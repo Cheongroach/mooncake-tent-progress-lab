@@ -1,0 +1,7 @@
+/upstream/
+/build/
+/cmake-build-*/
+__pycache__/
+*.py[cod]
+*.so
+*.xml

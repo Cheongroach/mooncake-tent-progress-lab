@@ -1,0 +1,943 @@
+diff --git a/mooncake-transfer-engine/tent/include/tent/transport/ascend/ascend_direct_transport.h b/mooncake-transfer-engine/tent/include/tent/transport/ascend/ascend_direct_transport.h
+index a4277e2..4510638 100644
+--- a/mooncake-transfer-engine/tent/include/tent/transport/ascend/ascend_direct_transport.h
++++ b/mooncake-transfer-engine/tent/include/tent/transport/ascend/ascend_direct_transport.h
+@@ -22,6 +22,7 @@
+ #include <mutex>
+ #include <string>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <utility>
+ #include <vector>
+ 
+@@ -38,7 +39,7 @@ struct HixlTask {
+     Request request;
+     volatile TransferStatusEnum status_word = TransferStatusEnum::PENDING;
+     volatile size_t transferred_bytes = 0;
+-    void* req_handle = nullptr;
++    uint64_t group_id = 0;
+     uint64_t batch_size = 0;
+     std::string remote_hixl;
+     int64_t start_time_ns = 0;
+@@ -99,6 +100,8 @@ class AscendDirectTransport : public Transport {
+         std::string remote;
+         bool counted = false;
+         bool local_copy = false;
++        void* req_handle = nullptr;
++        int64_t start_time_ns = 0;
+     };
+ 
+     Status initEngines();
+@@ -121,6 +124,10 @@ class AscendDirectTransport : public Transport {
+                           size_t* local_release_engine);
+     void completePolledTask(HixlTask& task);
+     void releaseInflight(int n = 1);
++    bool acquireInflight();
++    void progressPending();
++    void progressGroup(uint64_t group_id);
++    void completeGroup(uint64_t group_id, TransferStatusEnum status);
+ 
+     friend class AscendDirectTransportTestPeer;
+ 
+@@ -136,9 +143,15 @@ class AscendDirectTransport : public Transport {
+     std::vector<std::unique_ptr<HixlEngine>> engines_;
+     std::vector<std::unique_ptr<LocalCopyEngine>> local_copies_;
+ 
++    // Serialize vendor submit/publication, polling and route teardown. Never
++    // hold this mutex while waiting for an admission credit.
++    std::mutex progress_mutex_;
+     std::mutex req_mutex_;
+-    std::unordered_map<void*, GroupState> groups_;
+-    std::map<std::pair<size_t, std::string>, std::vector<void*>> route_groups_;
++    uint64_t next_group_id_{1};
++    std::unordered_map<uint64_t, GroupState> groups_;
++    std::unordered_set<uint64_t> pending_groups_;
++    std::map<std::pair<size_t, std::string>, std::vector<uint64_t>>
++        route_groups_;
+ 
+     std::mutex inflight_mu_;
+     std::condition_variable inflight_cv_;
+diff --git a/mooncake-transfer-engine/tent/src/transport/ascend/ascend_direct_transport.cpp b/mooncake-transfer-engine/tent/src/transport/ascend/ascend_direct_transport.cpp
+index e121853..491cd01 100644
+--- a/mooncake-transfer-engine/tent/src/transport/ascend/ascend_direct_transport.cpp
++++ b/mooncake-transfer-engine/tent/src/transport/ascend/ascend_direct_transport.cpp
+@@ -248,10 +248,12 @@ size_t AscendDirectTransport::currentEngineIndex() const {
+ 
+ Status AscendDirectTransport::uninstall() {
+     (void)quiesce();
++    std::lock_guard<std::mutex> progress_lock(progress_mutex_);
+     finalizeEngines();
+     {
+         std::lock_guard<std::mutex> lock(req_mutex_);
+         groups_.clear();
++        pending_groups_.clear();
+         route_groups_.clear();
+     }
+     inflight_.store(0, std::memory_order_release);
+@@ -265,14 +267,18 @@ Status AscendDirectTransport::quiesce() {
+     const auto deadline =
+         std::chrono::steady_clock::now() +
+         std::chrono::milliseconds(options_.transfer_timeout_ms);
+-    std::unique_lock<std::mutex> lock(inflight_mu_);
+     while (inflight_.load(std::memory_order_acquire) > 0) {
+-        if (inflight_cv_.wait_until(lock, deadline) ==
+-            std::cv_status::timeout) {
++        progressPending();
++        std::unique_lock<std::mutex> lock(inflight_mu_);
++        if (inflight_.load(std::memory_order_acquire) == 0) {
++            break;
++        }
++        if (std::chrono::steady_clock::now() >= deadline) {
+             LOG(WARNING) << "AscendDirectTransport quiesce timed out with "
+                          << inflight_.load() << " in-flight requests";
+             break;
+         }
++        inflight_cv_.wait_for(lock, std::chrono::milliseconds(1));
+     }
+     return Status::OK();
+ }
+@@ -291,10 +297,21 @@ Status AscendDirectTransport::allocateSubBatch(SubBatchRef& batch,
+ }
+ 
+ Status AscendDirectTransport::freeSubBatch(SubBatchRef& batch) {
++    std::lock_guard<std::mutex> progress_lock(progress_mutex_);
+     auto* hixl_batch = dynamic_cast<HixlSubBatch*>(batch);
+     if (!hixl_batch) {
+         return Status::InvalidArgument("Invalid HIXL sub-batch" LOC_MARK);
+     }
++    for (auto& task : hixl_batch->task_list) {
++        if (task.status_word == TransferStatusEnum::PENDING) {
++            progressGroup(task.group_id);
++            completePolledTask(task);
++            if (task.status_word == TransferStatusEnum::PENDING) {
++                return Status::InvalidArgument(
++                    "Cannot free an in-flight HIXL sub-batch" LOC_MARK);
++            }
++        }
++    }
+     Slab<HixlSubBatch>::Get().deallocate(hixl_batch);
+     batch = nullptr;
+     return Status::OK();
+@@ -368,7 +385,7 @@ Status AscendDirectTransport::submitTransferTasks(
+         task.request = prepared[i].request;
+         task.status_word = TransferStatusEnum::PENDING;
+         task.transferred_bytes = 0;
+-        task.req_handle = nullptr;
++        task.group_id = 0;
+         task.local_engine_idx = prepared[i].local_engine_idx;
+         task.remote_hixl = prepared[i].remote_hixl;
+         const bool write = task.request.opcode == Request::WRITE;
+@@ -398,20 +415,11 @@ void AscendDirectTransport::startGroup(const std::string& remote_hixl,
+         return;
+     }
+ 
+-    {
+-        std::unique_lock<std::mutex> lock(inflight_mu_);
+-        const auto deadline =
+-            std::chrono::steady_clock::now() +
+-            std::chrono::milliseconds(options_.transfer_timeout_ms);
+-        while (inflight_.load(std::memory_order_acquire) >= kMaxInflightReqs) {
+-            if (inflight_cv_.wait_until(lock, deadline) ==
+-                std::cv_status::timeout) {
+-                fail_all();
+-                return;
+-            }
+-        }
+-        inflight_.fetch_add(1, std::memory_order_acq_rel);
++    if (!acquireInflight()) {
++        fail_all();
++        return;
+     }
++    std::lock_guard<std::mutex> progress_lock(progress_mutex_);
+ 
+     std::vector<HixlOpDesc> op_descs;
+     op_descs.reserve(tasks.size());
+@@ -427,24 +435,28 @@ void AscendDirectTransport::startGroup(const std::string& remote_hixl,
+                                                             op_descs, req);
+     if (!status.ok() || req == nullptr) {
+         releaseInflight();
+-        // AutoConnect already tore down the failed route inside HIXL.
+         fail_all();
+         return;
+     }
+     const auto now = getCurrentTimeInNano();
++    uint64_t group_id;
+     {
+         std::lock_guard<std::mutex> lock(req_mutex_);
++        group_id = next_group_id_++;
+         GroupState group;
+         group.status = TransferStatusEnum::PENDING;
+         group.remaining = static_cast<int>(tasks.size());
+         group.engine_idx = local_engine_idx;
+         group.remote = remote_hixl;
+         group.counted = true;
+-        groups_[req] = std::move(group);
+-        route_groups_[{local_engine_idx, remote_hixl}].push_back(req);
++        group.req_handle = req;
++        group.start_time_ns = now;
++        groups_[group_id] = std::move(group);
++        pending_groups_.insert(group_id);
++        route_groups_[{local_engine_idx, remote_hixl}].push_back(group_id);
+     }
+     for (auto* task : tasks) {
+-        task->req_handle = req;
++        task->group_id = group_id;
+         task->batch_size = tasks.size();
+         task->start_time_ns = now;
+         task->status_word = TransferStatusEnum::PENDING;
+@@ -456,16 +468,18 @@ void AscendDirectTransport::markGroupHandles(const std::vector<void*>& handles,
+     int inflight_dec = 0;
+     {
+         std::lock_guard<std::mutex> lock(req_mutex_);
+-        for (void* handle : handles) {
+-            auto git = groups_.find(handle);
+-            if (git == groups_.end()) {
++        for (auto& [id, group] : groups_) {
++            if (!group.local_copy ||
++                std::find(handles.begin(), handles.end(), group.req_handle) ==
++                    handles.end()) {
+                 continue;
+             }
+-            if (git->second.status == TransferStatusEnum::PENDING) {
+-                git->second.status = status;
++            if (group.status == TransferStatusEnum::PENDING) {
++                group.status = status;
+             }
+-            if (git->second.counted) {
+-                git->second.counted = false;
++            pending_groups_.erase(id);
++            if (group.counted) {
++                group.counted = false;
+                 inflight_dec++;
+             }
+         }
+@@ -496,20 +510,11 @@ void AscendDirectTransport::startLocalCopy(
+         return;
+     }
+ 
+-    {
+-        std::unique_lock<std::mutex> lock(inflight_mu_);
+-        const auto deadline =
+-            std::chrono::steady_clock::now() +
+-            std::chrono::milliseconds(options_.transfer_timeout_ms);
+-        while (inflight_.load(std::memory_order_acquire) >= kMaxInflightReqs) {
+-            if (inflight_cv_.wait_until(lock, deadline) ==
+-                std::cv_status::timeout) {
+-                fail_all();
+-                return;
+-            }
+-        }
+-        inflight_.fetch_add(1, std::memory_order_acq_rel);
++    if (!acquireInflight()) {
++        fail_all();
++        return;
+     }
++    std::lock_guard<std::mutex> progress_lock(progress_mutex_);
+ 
+     std::vector<HixlOpDesc> op_descs;
+     op_descs.reserve(tasks.size());
+@@ -535,8 +540,10 @@ void AscendDirectTransport::startLocalCopy(
+     }
+ 
+     const auto now = getCurrentTimeInNano();
++    uint64_t group_id;
+     {
+         std::lock_guard<std::mutex> lock(req_mutex_);
++        group_id = next_group_id_++;
+         GroupState group;
+         group.status = TransferStatusEnum::PENDING;
+         group.remaining = static_cast<int>(tasks.size());
+@@ -544,10 +551,13 @@ void AscendDirectTransport::startLocalCopy(
+         group.remote = engines_[local_engine_idx]->name();
+         group.counted = true;
+         group.local_copy = true;
+-        groups_[req] = std::move(group);
++        group.req_handle = req;
++        group.start_time_ns = now;
++        groups_[group_id] = std::move(group);
++        pending_groups_.insert(group_id);
+     }
+     for (auto* task : tasks) {
+-        task->req_handle = req;
++        task->group_id = group_id;
+         task->batch_size = tasks.size();
+         task->start_time_ns = now;
+         task->status_word = TransferStatusEnum::PENDING;
+@@ -568,6 +578,121 @@ void AscendDirectTransport::releaseInflight(int n) {
+     inflight_cv_.notify_all();
+ }
+ 
++bool AscendDirectTransport::acquireInflight() {
++    const auto deadline =
++        std::chrono::steady_clock::now() +
++        std::chrono::milliseconds(options_.transfer_timeout_ms);
++    for (;;) {
++        {
++            std::lock_guard<std::mutex> lock(inflight_mu_);
++            if (inflight_.load(std::memory_order_acquire) < kMaxInflightReqs) {
++                inflight_.fetch_add(1, std::memory_order_acq_rel);
++                return true;
++            }
++        }
++        // A single submitter may also be the only consumer. Waiting solely
++        // for getTransferStatus() here prevents it from ever reaching poll.
++        progressPending();
++        std::unique_lock<std::mutex> lock(inflight_mu_);
++        if (inflight_.load(std::memory_order_acquire) < kMaxInflightReqs) {
++            continue;
++        }
++        if (std::chrono::steady_clock::now() >= deadline) {
++            return false;
++        }
++        inflight_cv_.wait_for(lock, std::chrono::milliseconds(1));
++    }
++}
++
++void AscendDirectTransport::progressPending() {
++    std::lock_guard<std::mutex> progress_lock(progress_mutex_);
++    std::vector<uint64_t> pending;
++    {
++        std::lock_guard<std::mutex> lock(req_mutex_);
++        pending.assign(pending_groups_.begin(), pending_groups_.end());
++    }
++    for (auto id : pending) {
++        progressGroup(id);
++    }
++}
++
++void AscendDirectTransport::completeGroup(uint64_t group_id,
++                                          TransferStatusEnum status) {
++    bool release = false;
++    void* local_handle = nullptr;
++    size_t local_engine = 0;
++    {
++        std::lock_guard<std::mutex> lock(req_mutex_);
++        auto it = groups_.find(group_id);
++        if (it == groups_.end() ||
++            it->second.status != TransferStatusEnum::PENDING) {
++            return;
++        }
++        it->second.status = status;
++        release = it->second.counted;
++        it->second.counted = false;
++        pending_groups_.erase(group_id);
++        if (it->second.local_copy) {
++            local_handle = it->second.req_handle;
++            local_engine = it->second.engine_idx;
++            it->second.req_handle = nullptr;
++        }
++    }
++    if (local_handle != nullptr) {
++        local_copies_[local_engine]->release(local_handle);
++    }
++    // Completion releases admission independently of how many tasks in the
++    // group have been observed by the caller. Keep their result until then.
++    if (release) {
++        releaseInflight();
++    }
++}
++
++void AscendDirectTransport::progressGroup(uint64_t group_id) {
++    GroupState group;
++    {
++        std::lock_guard<std::mutex> lock(req_mutex_);
++        auto it = groups_.find(group_id);
++        if (it == groups_.end() ||
++            it->second.status != TransferStatusEnum::PENDING) {
++            return;
++        }
++        group = it->second;
++    }
++    TransferStatusEnum mapped = TransferStatusEnum::FAILED;
++    if (group.local_copy) {
++        if (group.engine_idx < local_copies_.size() &&
++            local_copies_[group.engine_idx]) {
++            mapped = local_copies_[group.engine_idx]->poll(group.req_handle);
++        }
++    } else if (group.engine_idx < engines_.size() &&
++               engines_[group.engine_idx]) {
++        HixlXferState state = HixlXferState::Waiting;
++        auto err = engines_[group.engine_idx]->getTransferStatus(
++            group.req_handle, state);
++        mapped = err.ok() ? FromHixlState(state) : TransferStatusEnum::FAILED;
++    }
++    // Observe actual completion before enforcing the software deadline:
++    // delayed application polling must not turn completed DMA into timeout.
++    const auto now = getCurrentTimeInNano();
++    if (mapped == TransferStatusEnum::PENDING && now >= 0 &&
++        group.start_time_ns >= 0 &&
++        now - group.start_time_ns > transfer_timeout_ns_) {
++        mapped = TransferStatusEnum::TIMEOUT;
++    }
++    if (mapped == TransferStatusEnum::PENDING) {
++        return;
++    }
++    if (mapped == TransferStatusEnum::COMPLETED) {
++        completeGroup(group_id, mapped);
++    } else if (group.local_copy) {
++        failLocalCopyStream(group.engine_idx, mapped);
++    } else {
++        failEntireRoute(group.engine_idx, group.remote, mapped,
++                        mapped == TransferStatusEnum::TIMEOUT);
++    }
++}
++
+ bool AscendDirectTransport::applyGroupStatus(HixlTask& task,
+                                              GroupState& group) {
+     task.status_word = group.status;
+@@ -592,11 +717,11 @@ void AscendDirectTransport::failEntireRoute(size_t engine_idx,
+     {
+         std::lock_guard<std::mutex> lock(req_mutex_);
+         auto it = route_groups_.find({engine_idx, remote});
+-        std::vector<void*> handles;
++        std::vector<uint64_t> handles;
+         if (it != route_groups_.end()) {
+             handles = it->second;
+         }
+-        for (void* handle : handles) {
++        for (auto handle : handles) {
+             auto git = groups_.find(handle);
+             if (git == groups_.end()) {
+                 continue;
+@@ -608,6 +733,7 @@ void AscendDirectTransport::failEntireRoute(size_t engine_idx,
+                 git->second.counted = false;
+                 inflight_dec++;
+             }
++            pending_groups_.erase(handle);
+         }
+     }
+     // Never acquire inflight_mu_ while holding req_mutex_: submit waits on
+@@ -622,7 +748,7 @@ void AscendDirectTransport::failEntireRoute(size_t engine_idx,
+ bool AscendDirectTransport::finishTaskLocked(HixlTask& task,
+                                              void** local_release_handle,
+                                              size_t* local_release_engine) {
+-    auto git = groups_.find(task.req_handle);
++    auto git = groups_.find(task.group_id);
+     if (git == groups_.end()) {
+         return false;
+     }
+@@ -635,7 +761,7 @@ bool AscendDirectTransport::finishTaskLocked(HixlTask& task,
+     if (route_it != route_groups_.end()) {
+         auto& handles = route_it->second;
+         handles.erase(
+-            std::remove(handles.begin(), handles.end(), task.req_handle),
++            std::remove(handles.begin(), handles.end(), task.group_id),
+             handles.end());
+         if (handles.empty()) {
+             route_groups_.erase(route_it);
+@@ -643,7 +769,7 @@ bool AscendDirectTransport::finishTaskLocked(HixlTask& task,
+     }
+     if (local_release_handle != nullptr && local_release_engine != nullptr &&
+         git->second.local_copy) {
+-        *local_release_handle = task.req_handle;
++        *local_release_handle = git->second.req_handle;
+         *local_release_engine = git->second.engine_idx;
+     }
+     groups_.erase(git);
+@@ -656,7 +782,7 @@ void AscendDirectTransport::completePolledTask(HixlTask& task) {
+     size_t local_engine = 0;
+     {
+         std::lock_guard<std::mutex> lock(req_mutex_);
+-        auto git = groups_.find(task.req_handle);
++        auto git = groups_.find(task.group_id);
+         if (git != groups_.end() &&
+             git->second.status != TransferStatusEnum::PENDING) {
+             release = finishTaskLocked(task, &local_handle, &local_engine);
+@@ -675,6 +801,7 @@ void AscendDirectTransport::completePolledTask(HixlTask& task) {
+ 
+ Status AscendDirectTransport::getTransferStatus(SubBatchRef batch, int task_id,
+                                                 TransferStatus& status) {
++    std::lock_guard<std::mutex> progress_lock(progress_mutex_);
+     auto* hixl_batch = dynamic_cast<HixlSubBatch*>(batch);
+     if (!hixl_batch) {
+         return Status::InvalidArgument("Invalid HIXL sub-batch" LOC_MARK);
+@@ -688,94 +815,12 @@ Status AscendDirectTransport::getTransferStatus(SubBatchRef batch, int task_id,
+         status = TransferStatus{task.status_word, task.transferred_bytes};
+         return Status::OK();
+     }
+-    if (task.req_handle == nullptr) {
+-        status = TransferStatus{task.status_word, task.transferred_bytes};
+-        return Status::OK();
+-    }
+-
+-    completePolledTask(task);
+-    if (task.status_word != TransferStatusEnum::PENDING) {
+-        status = TransferStatus{task.status_word, task.transferred_bytes};
+-        return Status::OK();
+-    }
+-
+-    const auto now = getCurrentTimeInNano();
+-    if (now >= 0 && task.start_time_ns >= 0 &&
+-        (now - task.start_time_ns) > transfer_timeout_ns_) {
+-        if (task.local_copy) {
+-            failLocalCopyStream(task.local_engine_idx,
+-                                TransferStatusEnum::TIMEOUT);
+-        } else {
+-            failEntireRoute(task.local_engine_idx, task.remote_hixl,
+-                            TransferStatusEnum::TIMEOUT, /*disconnect=*/true);
+-        }
+-        completePolledTask(task);
+-        if (task.status_word == TransferStatusEnum::PENDING) {
+-            task.status_word = TransferStatusEnum::TIMEOUT;
+-        }
+-        status = TransferStatus{task.status_word, task.transferred_bytes};
+-        return Status::OK();
+-    }
+-
+-    if (task.local_copy) {
+-        if (task.local_engine_idx >= local_copies_.size() ||
+-            !local_copies_[task.local_engine_idx]) {
+-            failLocalCopyStream(task.local_engine_idx,
+-                                TransferStatusEnum::FAILED);
+-        } else {
+-            const auto mapped =
+-                local_copies_[task.local_engine_idx]->poll(task.req_handle);
+-            if (mapped == TransferStatusEnum::COMPLETED ||
+-                mapped == TransferStatusEnum::FAILED) {
+-                std::lock_guard<std::mutex> lock(req_mutex_);
+-                auto git = groups_.find(task.req_handle);
+-                if (git != groups_.end() &&
+-                    git->second.status == TransferStatusEnum::PENDING) {
+-                    git->second.status = mapped;
+-                }
+-            }
+-        }
+-        completePolledTask(task);
+-        if (task.status_word == TransferStatusEnum::PENDING &&
+-            (task.local_engine_idx >= local_copies_.size() ||
+-             !local_copies_[task.local_engine_idx])) {
+-            task.status_word = TransferStatusEnum::FAILED;
+-        }
+-        status = TransferStatus{task.status_word, task.transferred_bytes};
+-        return Status::OK();
+-    }
+-
+-    if (task.local_engine_idx >= engines_.size() ||
+-        !engines_[task.local_engine_idx]) {
+-        failEntireRoute(task.local_engine_idx, task.remote_hixl,
+-                        TransferStatusEnum::FAILED, /*disconnect=*/false);
+-        completePolledTask(task);
+-        if (task.status_word == TransferStatusEnum::PENDING) {
+-            task.status_word = TransferStatusEnum::FAILED;
+-        }
++    if (task.group_id == 0) {
+         status = TransferStatus{task.status_word, task.transferred_bytes};
+         return Status::OK();
+     }
+ 
+-    HixlXferState xfer_status = HixlXferState::Waiting;
+-    auto err = engines_[task.local_engine_idx]->getTransferStatus(
+-        task.req_handle, xfer_status);
+-    const auto mapped = FromHixlState(xfer_status);
+-    if (!err.ok() || mapped == TransferStatusEnum::FAILED) {
+-        failEntireRoute(task.local_engine_idx, task.remote_hixl,
+-                        TransferStatusEnum::FAILED, /*disconnect=*/false);
+-    } else if (mapped == TransferStatusEnum::TIMEOUT) {
+-        failEntireRoute(task.local_engine_idx, task.remote_hixl,
+-                        TransferStatusEnum::TIMEOUT, /*disconnect=*/true);
+-    } else if (mapped == TransferStatusEnum::COMPLETED) {
+-        std::lock_guard<std::mutex> lock(req_mutex_);
+-        auto git = groups_.find(task.req_handle);
+-        if (git != groups_.end() &&
+-            git->second.status == TransferStatusEnum::PENDING) {
+-            git->second.status = TransferStatusEnum::COMPLETED;
+-        }
+-    }
+-
++    progressGroup(task.group_id);
+     completePolledTask(task);
+     status = TransferStatus{task.status_word, task.transferred_bytes};
+     return Status::OK();
+diff --git a/mooncake-transfer-engine/tent/src/transport/ascend/local_copy_engine.cpp b/mooncake-transfer-engine/tent/src/transport/ascend/local_copy_engine.cpp
+index ce9c543..fa4242e 100644
+--- a/mooncake-transfer-engine/tent/src/transport/ascend/local_copy_engine.cpp
++++ b/mooncake-transfer-engine/tent/src/transport/ascend/local_copy_engine.cpp
+@@ -112,6 +112,13 @@ Status LocalCopyEngine::initialize(aclrtContext context, int32_t device_id) {
+ void LocalCopyEngine::finalize() {
+     std::lock_guard<std::mutex> lock(mutex_);
+     ContextGuard guard(context_);
++    // Completion markers are DMA destinations. Stop the stream before
++    // releasing either side of the queued device-to-host marker copies.
++    if (stream_ != nullptr) {
++        (void)aclrtStreamAbort(stream_);
++        (void)aclrtDestroyStream(stream_);
++        stream_ = nullptr;
++    }
+     for (auto& [handle, group] : groups_) {
+         (void)handle;
+         if (group) {
+@@ -119,11 +126,6 @@ void LocalCopyEngine::finalize() {
+         }
+     }
+     groups_.clear();
+-    if (stream_ != nullptr) {
+-        (void)aclrtStreamAbort(stream_);
+-        (void)aclrtDestroyStream(stream_);
+-        stream_ = nullptr;
+-    }
+     if (device_one_ != nullptr) {
+         (void)aclrtFree(device_one_);
+         device_one_ = nullptr;
+@@ -212,9 +214,9 @@ Status LocalCopyEngine::submit(bool write, const std::vector<HixlOpDesc>& ops,
+     CHECK_STATUS(allocHostFlag(group->host_flag));
+ 
+     auto fail_stream = [&]() {
++        failed_handles = failAndRecreateLocked();
+         freeHostFlag(group->host_flag);
+         group->host_flag = nullptr;
+-        failed_handles = failAndRecreateLocked();
+     };
+ 
+     for (const auto& op : ops) {
+diff --git a/mooncake-transfer-engine/tent/tests/ascend_direct_transport_test.cpp b/mooncake-transfer-engine/tent/tests/ascend_direct_transport_test.cpp
+index e9c9a02..20c8f65 100644
+--- a/mooncake-transfer-engine/tent/tests/ascend_direct_transport_test.cpp
++++ b/mooncake-transfer-engine/tent/tests/ascend_direct_transport_test.cpp
+@@ -45,6 +45,8 @@ int g_stream_destroys = 0;
+ bool g_memcpy_async_fail = false;
+ bool g_skip_memcpy_copy = false;
+ uintptr_t g_next_stream = 0x3000;
++std::map<void*, aclrtStream> g_pending_flags;
++int g_flags_freed_before_abort = 0;
+ 
+ constexpr uintptr_t kContextBase = 0x10000;
+ 
+@@ -70,6 +72,8 @@ void ResetAcl() {
+     g_memcpy_async_fail = false;
+     g_skip_memcpy_copy = false;
+     g_next_stream = 0x3000;
++    g_pending_flags.clear();
++    g_flags_freed_before_abort = 0;
+ }
+ 
+ }  // namespace
+@@ -135,6 +139,9 @@ aclError aclrtMemcpyAsync(void* dst, size_t destMax, const void* src,
+     if (g_memcpy_async_fail) {
+         return 1;
+     }
++    if (g_skip_memcpy_copy && kind == ACL_MEMCPY_DEVICE_TO_HOST) {
++        g_pending_flags[dst] = stream;
++    }
+     if (g_skip_memcpy_copy || dst == nullptr || src == nullptr || count == 0) {
+         return ACL_ERROR_NONE;
+     }
+@@ -164,6 +171,9 @@ aclError aclrtMallocHost(void** hostPtr, size_t size) {
+ }
+ 
+ aclError aclrtFreeHost(void* hostPtr) {
++    if (g_pending_flags.erase(hostPtr)) {
++        ++g_flags_freed_before_abort;
++    }
+     std::free(hostPtr);
+     return ACL_ERROR_NONE;
+ }
+@@ -184,7 +194,13 @@ aclError aclrtDestroyStream(aclrtStream stream) {
+ }
+ 
+ aclError aclrtStreamAbort(aclrtStream stream) {
+-    (void)stream;
++    for (auto it = g_pending_flags.begin(); it != g_pending_flags.end();) {
++        if (it->second == stream) {
++            it = g_pending_flags.erase(it);
++        } else {
++            ++it;
++        }
++    }
+     return ACL_ERROR_NONE;
+ }
+ 
+@@ -232,6 +248,7 @@ struct MockHixlState {
+     int deregister_calls = 0;
+     int concurrent_transfer = 0;
+     int max_concurrent_transfer = 0;
++    int submit_delay_ms = 5;
+     bool fail_next_transfer = false;
+     int fail_register_on = -1;
+     HixlXferState xfer_state = HixlXferState::Completed;
+@@ -301,7 +318,8 @@ class MockHixlVendor final : public HixlEngine::Vendor {
+                 return 1;
+             }
+         }
+-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
++        std::this_thread::sleep_for(
++            std::chrono::milliseconds(state_->submit_delay_ms));
+         {
+             std::lock_guard<std::mutex> lock(state_->mu);
+             state_->concurrent_transfer--;
+@@ -711,6 +729,99 @@ TEST_F(AscendDirectTransportTest, QuiesceWaitsForInflight) {
+     EXPECT_EQ(AscendDirectTransportTestPeer::inflight(*transport_), 0);
+ }
+ 
++TEST_F(AscendDirectTransportTest, SaturatedRemoteSubmitMakesProgress) {
++    state_->submit_delay_ms = 0;
++    auto conf = std::make_shared<Config>();
++    conf->set("transports/ascend_direct/transfer_timeout_ms", 100);
++    ASSERT_TRUE(InstallAgentTwoEngines(conf).ok());
++    PublishEngineBuffers();
++    ASSERT_TRUE(transport_->allocateSubBatch(batch_, 202).ok());
++    char src[16]{};
++    // Each submit is a separate vendor request with two consumer tasks.
++    for (int i = 0; i < 101; ++i) {
++        ASSERT_TRUE(transport_
++                        ->submitTransferTasks(batch_, {MakeRemoteWrite(src, 16),
++                                                       MakeRemoteWrite(src, 8)})
++                        .ok());
++        EXPECT_LE(AscendDirectTransportTestPeer::inflight(*transport_), 100);
++    }
++    EXPECT_EQ(state_->transfer_async_calls, 101);
++    for (int i = 201; i >= 0; --i) {
++        TransferStatus status{};
++        ASSERT_TRUE(transport_->getTransferStatus(batch_, i, status).ok());
++        EXPECT_EQ(status.s, TransferStatusEnum::COMPLETED) << i;
++        EXPECT_EQ(status.transferred_bytes, i % 2 ? 8u : 16u) << i;
++    }
++    EXPECT_EQ(AscendDirectTransportTestPeer::inflight(*transport_), 0);
++}
++
++TEST_F(AscendDirectTransportTest, SaturatedLocalSubmitMakesProgress) {
++    auto conf = std::make_shared<Config>();
++    conf->set("transports/ascend_direct/transfer_timeout_ms", 100);
++    ASSERT_TRUE(Install(conf).ok());
++    ASSERT_TRUE(transport_->allocateSubBatch(batch_, 101).ok());
++    char src[16]{};
++    for (int i = 0; i < 101; ++i) {
++        ASSERT_TRUE(
++            transport_
++                ->submitTransferTasks(batch_, {MakeWrite(src, 0x1000, 16)})
++                .ok());
++    }
++    for (int i = 100; i >= 0; --i) {
++        TransferStatus status{};
++        ASSERT_TRUE(transport_->getTransferStatus(batch_, i, status).ok());
++        EXPECT_EQ(status.s, TransferStatusEnum::COMPLETED) << i;
++    }
++    EXPECT_EQ(AscendDirectTransportTestPeer::inflight(*transport_), 0);
++}
++
++TEST_F(AscendDirectTransportTest, QuiesceProgressesWithoutConsumerPolling) {
++    state_->submit_delay_ms = 0;
++    auto conf = std::make_shared<Config>();
++    conf->set("transports/ascend_direct/transfer_timeout_ms", 100);
++    ASSERT_TRUE(InstallAgentTwoEngines(conf).ok());
++    PublishEngineBuffers();
++    ASSERT_TRUE(transport_->allocateSubBatch(batch_, 2).ok());
++    char src[16]{};
++    ASSERT_TRUE(transport_
++                    ->submitTransferTasks(batch_, {MakeRemoteWrite(src, 16),
++                                                   MakeRemoteWrite(src, 8)})
++                    .ok());
++    ASSERT_TRUE(transport_->quiesce().ok());
++    EXPECT_EQ(AscendDirectTransportTestPeer::inflight(*transport_), 0);
++    TransferStatus status{};
++    ASSERT_TRUE(transport_->getTransferStatus(batch_, 1, status).ok());
++    EXPECT_EQ(status.s, TransferStatusEnum::COMPLETED);
++    EXPECT_EQ(status.transferred_bytes, 8u);
++    ASSERT_TRUE(transport_->getTransferStatus(batch_, 0, status).ok());
++    EXPECT_EQ(status.s, TransferStatusEnum::COMPLETED);
++}
++
++TEST_F(AscendDirectTransportTest, ReusedVendorHandleDoesNotOverwriteSibling) {
++    ASSERT_TRUE(InstallAgentTwoEngines().ok());
++    PublishEngineBuffers();
++    ASSERT_TRUE(transport_->allocateSubBatch(batch_, 3).ok());
++    char src[16]{};
++    auto handle = state_->next_handle.load();
++    ASSERT_TRUE(transport_
++                    ->submitTransferTasks(batch_, {MakeRemoteWrite(src, 16),
++                                                   MakeRemoteWrite(src, 8)})
++                    .ok());
++    TransferStatus status{};
++    ASSERT_TRUE(transport_->getTransferStatus(batch_, 0, status).ok());
++    EXPECT_EQ(status.s, TransferStatusEnum::COMPLETED);
++    state_->next_handle.store(handle);
++    state_->xfer_state = HixlXferState::Failed;
++    ASSERT_TRUE(
++        transport_->submitTransferTasks(batch_, {MakeRemoteWrite(src, 4)})
++            .ok());
++    ASSERT_TRUE(transport_->getTransferStatus(batch_, 2, status).ok());
++    EXPECT_EQ(status.s, TransferStatusEnum::FAILED);
++    ASSERT_TRUE(transport_->getTransferStatus(batch_, 1, status).ok());
++    EXPECT_EQ(status.s, TransferStatusEnum::COMPLETED);
++    EXPECT_EQ(status.transferred_bytes, 8u);
++}
++
+ TEST_F(AscendDirectTransportTest, PerEngineMutexSerializesSubmit) {
+     ASSERT_TRUE(InstallAgentTwoEngines().ok());
+     PublishEngineBuffers();
+@@ -743,6 +854,176 @@ TEST_F(AscendDirectTransportTest, PerEngineMutexSerializesSubmit) {
+     (void)transport_->freeSubBatch(batch_b);
+ }
+ 
++TEST_F(AscendDirectTransportTest, ConcurrentSaturatedSubmitters) {
++    state_->submit_delay_ms = 0;
++    auto conf = std::make_shared<Config>();
++    conf->set("transports/ascend_direct/transfer_timeout_ms", 1000);
++    ASSERT_TRUE(InstallAgentTwoEngines(conf).ok());
++    PublishEngineBuffers();
++    std::vector<std::thread> threads;
++    std::atomic<int> failures{0};
++    for (int worker = 0; worker < 8; ++worker) {
++        threads.emplace_back([&] {
++            Transport::SubBatchRef batch = nullptr;
++            if (!transport_->allocateSubBatch(batch, 256).ok()) {
++                ++failures;
++                return;
++            }
++            char src[16]{};
++            for (int i = 0; i < 256; ++i) {
++                if (!transport_
++                         ->submitTransferTasks(batch,
++                                               {MakeRemoteWrite(src, 16)})
++                         .ok()) {
++                    ++failures;
++                }
++            }
++            for (int i = 255; i >= 0; --i) {
++                TransferStatus status{};
++                if (!transport_->getTransferStatus(batch, i, status).ok() ||
++                    status.s != TransferStatusEnum::COMPLETED ||
++                    status.transferred_bytes != 16) {
++                    ++failures;
++                }
++            }
++            (void)transport_->freeSubBatch(batch);
++        });
++    }
++    for (auto& thread : threads) {
++        thread.join();
++    }
++    EXPECT_EQ(failures.load(), 0);
++    EXPECT_EQ(state_->transfer_async_calls, 2048);
++    EXPECT_EQ(state_->get_status_calls, 2048);
++    EXPECT_EQ(AscendDirectTransportTestPeer::inflight(*transport_), 0);
++}
++
++TEST_F(AscendDirectTransportTest, SaturationTimeoutReleasesRouteOnce) {
++    state_->submit_delay_ms = 0;
++    state_->xfer_state = HixlXferState::Waiting;
++    auto conf = std::make_shared<Config>();
++    conf->set("transports/ascend_direct/transfer_timeout_ms", 10);
++    ASSERT_TRUE(InstallAgentTwoEngines(conf).ok());
++    PublishEngineBuffers();
++    ASSERT_TRUE(transport_->allocateSubBatch(batch_, 101).ok());
++    char src[16]{};
++    for (int i = 0; i < 101; ++i) {
++        ASSERT_TRUE(
++            transport_->submitTransferTasks(batch_, {MakeRemoteWrite(src, 16)})
++                .ok());
++    }
++    EXPECT_EQ(state_->transfer_async_calls, 101);
++    EXPECT_EQ(state_->disconnect_calls, 1);
++    for (int i = 0; i < 100; ++i) {
++        TransferStatus status{};
++        ASSERT_TRUE(transport_->getTransferStatus(batch_, i, status).ok());
++        EXPECT_EQ(status.s, TransferStatusEnum::TIMEOUT);
++    }
++    state_->xfer_state = HixlXferState::Completed;
++    TransferStatus status{};
++    ASSERT_TRUE(transport_->getTransferStatus(batch_, 100, status).ok());
++    EXPECT_EQ(status.s, TransferStatusEnum::COMPLETED);
++    EXPECT_EQ(AscendDirectTransportTestPeer::inflight(*transport_), 0);
++}
++
++TEST_F(AscendDirectTransportTest,
++       FreeRejectsPendingThenConsumesCompletedGroup) {
++    state_->submit_delay_ms = 0;
++    state_->xfer_state = HixlXferState::Waiting;
++    ASSERT_TRUE(InstallAgentTwoEngines().ok());
++    PublishEngineBuffers();
++    ASSERT_TRUE(transport_->allocateSubBatch(batch_, 2).ok());
++    char src[16]{};
++    ASSERT_TRUE(transport_
++                    ->submitTransferTasks(batch_, {MakeRemoteWrite(src, 16),
++                                                   MakeRemoteWrite(src, 8)})
++                    .ok());
++    EXPECT_FALSE(transport_->freeSubBatch(batch_).ok());
++    ASSERT_NE(batch_, nullptr);
++    EXPECT_EQ(AscendDirectTransportTestPeer::inflight(*transport_), 1);
++    state_->xfer_state = HixlXferState::Completed;
++    EXPECT_TRUE(transport_->freeSubBatch(batch_).ok());
++    EXPECT_EQ(batch_, nullptr);
++    EXPECT_EQ(AscendDirectTransportTestPeer::inflight(*transport_), 0);
++}
++
++TEST_F(AscendDirectTransportTest, FailureDoesNotPoisonAnotherRemoteRoute) {
++    state_->submit_delay_ms = 0;
++    g_device_count = 3;
++    auto conf = std::make_shared<Config>();
++    conf->set("transports/ascend_direct/agent_mode", true);
++    ASSERT_TRUE(Install(conf).ok());
++    PublishEngineBuffers();
++    ASSERT_TRUE(metadata_->segmentManager()
++                    .updateLocal([](SegmentDesc& desc) {
++                        BufferDesc third{};
++                        third.addr = 0x30000;
++                        third.length = 4096;
++                        third.transport_attrs[AscendDirect] = "2";
++                        std::get<MemorySegmentDesc>(desc.detail)
++                            .buffers.push_back(third);
++                        return Status::OK();
++                    })
++                    .ok());
++    g_device_id = 0;
++    ASSERT_TRUE(transport_->allocateSubBatch(batch_, 2).ok());
++    char src[16]{};
++    ASSERT_TRUE(
++        transport_
++            ->submitTransferTasks(batch_, {MakeRemoteWrite(src, 16),
++                                           MakeRemoteWrite(src, 8, 0x30010)})
++            .ok());
++    EXPECT_EQ(AscendDirectTransportTestPeer::inflight(*transport_), 2);
++    state_->xfer_state = HixlXferState::Failed;
++    TransferStatus status{};
++    ASSERT_TRUE(transport_->getTransferStatus(batch_, 0, status).ok());
++    EXPECT_EQ(status.s, TransferStatusEnum::FAILED);
++    EXPECT_EQ(AscendDirectTransportTestPeer::inflight(*transport_), 1);
++    state_->xfer_state = HixlXferState::Completed;
++    ASSERT_TRUE(transport_->getTransferStatus(batch_, 1, status).ok());
++    EXPECT_EQ(status.s, TransferStatusEnum::COMPLETED);
++    EXPECT_EQ(status.transferred_bytes, 8u);
++    EXPECT_EQ(AscendDirectTransportTestPeer::inflight(*transport_), 0);
++}
++
++TEST_F(AscendDirectTransportTest, UnsaturatedSubmitPollRoundTrips) {
++    state_->submit_delay_ms = 0;
++    ASSERT_TRUE(InstallAgentTwoEngines().ok());
++    PublishEngineBuffers();
++    char src[16]{};
++    const auto start = std::chrono::steady_clock::now();
++    for (int i = 0; i < 10000; ++i) {
++        ASSERT_TRUE(transport_->allocateSubBatch(batch_, 1).ok());
++        ASSERT_TRUE(
++            transport_->submitTransferTasks(batch_, {MakeRemoteWrite(src, 16)})
++                .ok());
++        TransferStatus status{};
++        ASSERT_TRUE(transport_->getTransferStatus(batch_, 0, status).ok());
++        ASSERT_EQ(status.s, TransferStatusEnum::COMPLETED);
++        ASSERT_EQ(status.transferred_bytes, 16u);
++        ASSERT_TRUE(transport_->freeSubBatch(batch_).ok());
++    }
++    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                        std::chrono::steady_clock::now() - start)
++                        .count();
++    RecordProperty("ns_per_round_trip", ns / 10000);
++    EXPECT_EQ(state_->get_status_calls, 10000);
++    EXPECT_EQ(AscendDirectTransportTestPeer::inflight(*transport_), 0);
++}
++
++TEST_F(AscendDirectTransportTest, LocalFinalizeAbortsBeforeFreeingFlags) {
++    LocalCopyEngine local;
++    ASSERT_TRUE(local.initialize(g_context, 0).ok());
++    g_skip_memcpy_copy = true;
++    void* handle = nullptr;
++    std::vector<void*> failed;
++    ASSERT_TRUE(
++        local.submit(true, {{0x1000, 0x2000, 16}}, handle, failed).ok());
++    ASSERT_FALSE(g_pending_flags.empty());
++    local.finalize();
++    EXPECT_EQ(g_flags_freed_before_abort, 0);
++}
++
+ TEST(AscendDirectResourceConfigTest, StoreJsonIsolation) {
+     ClearAscendEnv();
+     auto conf = std::make_shared<Config>();

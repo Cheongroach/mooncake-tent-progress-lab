@@ -1,0 +1,20 @@
+{
+  "scope": "Full TENT Ascend Direct build against authentic CANN/HIXL 9.1 libraries, followed by the upstream mock unit-test target",
+  "build_exit_code": 0,
+  "test_counts": {
+    "tests": 34,
+    "failures": 0,
+    "errors": 0,
+    "disabled": 0
+  },
+  "sdk": "CANN/HIXL 9.1.0",
+  "compiler": "GCC 11.4.0",
+  "glibc": "2.35",
+  "dynamic_dependencies_resolved": true,
+  "device_execution": false,
+  "limitations": [
+    "ACL functions and HIXL vendor operations are mocked by the unit test.",
+    "HAL resolves to the toolkit devlib, not a running NPU driver.",
+    "The result establishes SDK compilation and linking, not NPU DMA or cross-host HIXL behavior."
+  ]
+}

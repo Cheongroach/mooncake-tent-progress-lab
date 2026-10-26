@@ -1,0 +1,42 @@
+{
+  "baseline": {
+    "tests": 33,
+    "failures": 7,
+    "seconds": 10.547,
+    "failed_cases": [
+      "SaturatedRemoteSubmitMakesProgress",
+      "SaturatedLocalSubmitMakesProgress",
+      "QuiesceProgressesWithoutConsumerPolling",
+      "ReusedVendorHandleDoesNotOverwriteSibling",
+      "SaturationTimeoutReleasesRouteOnce",
+      "FreeRejectsPendingThenConsumesCompletedGroup",
+      "LocalFinalizeAbortsBeforeFreeingFlags"
+    ]
+  },
+  "cpu": {
+    "tests": 34,
+    "failures": 0,
+    "seconds": 0.28,
+    "failed_cases": []
+  },
+  "asan": {
+    "tests": 34,
+    "failures": 0,
+    "seconds": 0.81,
+    "failed_cases": []
+  },
+  "tsan": {
+    "tests": 34,
+    "failures": 0,
+    "seconds": 2.472,
+    "failed_cases": []
+  },
+  "scope": "Actual TENT Ascend source + injected vendor and CPU ACL/RPC shims; not hardware validation",
+  "patch_sha256": "e84d1e9752ba6e19752e2413198ceab3399090df09b4cf7a4b802e17e497b8cc",
+  "release": {
+    "tests": 34,
+    "failures": 0,
+    "seconds": 0.091,
+    "source": "final formatted sources"
+  }
+}

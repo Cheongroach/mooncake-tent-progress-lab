@@ -1,0 +1,345 @@
+{
+  "world": 4,
+  "hosts": 1,
+  "transport": "tcp",
+  "rank_rows": 576,
+  "cases_per_rank": 144,
+  "transfers": 36864,
+  "payload_bytes": 13740539904,
+  "integrity": "all scheduled ranges verified",
+  "rank_exits": [
+    [
+      0,
+      0,
+      0,
+      0
+    ]
+  ],
+  "note": "Independent samples share physical NICs. Per-initiator API timing includes Python/ctypes submission, polling and freeing; excludes registration and verification. Not raw NIC bandwidth.",
+  "cells": [
+    {
+      "pattern": "pair",
+      "operation": "read",
+      "bytes": 4096,
+      "window": 1,
+      "per_initiator_GBps_median": 0.02877724842766148,
+      "per_initiator_round_ms_median": 18.2198105,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "read",
+      "bytes": 4096,
+      "window": 32,
+      "per_initiator_GBps_median": 0.07648724616493581,
+      "per_initiator_round_ms_median": 6.8546515,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "read",
+      "bytes": 4096,
+      "window": 128,
+      "per_initiator_GBps_median": 0.08263287550018443,
+      "per_initiator_round_ms_median": 6.346367000000001,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "read",
+      "bytes": 65536,
+      "window": 1,
+      "per_initiator_GBps_median": 0.33302235961757876,
+      "per_initiator_round_ms_median": 25.2004965,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "read",
+      "bytes": 65536,
+      "window": 32,
+      "per_initiator_GBps_median": 0.8556414293540926,
+      "per_initiator_round_ms_median": 9.8040105,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "read",
+      "bytes": 65536,
+      "window": 128,
+      "per_initiator_GBps_median": 0.896810151728189,
+      "per_initiator_round_ms_median": 9.3538775,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "read",
+      "bytes": 1048576,
+      "window": 1,
+      "per_initiator_GBps_median": 1.2961595955747414,
+      "per_initiator_round_ms_median": 103.5506015,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "read",
+      "bytes": 1048576,
+      "window": 32,
+      "per_initiator_GBps_median": 2.183934713692721,
+      "per_initiator_round_ms_median": 61.458214,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "read",
+      "bytes": 1048576,
+      "window": 128,
+      "per_initiator_GBps_median": 2.2258925006545534,
+      "per_initiator_round_ms_median": 60.298602,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "write",
+      "bytes": 4096,
+      "window": 1,
+      "per_initiator_GBps_median": 0.031320897611860216,
+      "per_initiator_round_ms_median": 16.739249,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "write",
+      "bytes": 4096,
+      "window": 32,
+      "per_initiator_GBps_median": 0.08977066105546821,
+      "per_initiator_round_ms_median": 5.8403054999999995,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "write",
+      "bytes": 4096,
+      "window": 128,
+      "per_initiator_GBps_median": 0.09326301583805457,
+      "per_initiator_round_ms_median": 5.6217425,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "write",
+      "bytes": 65536,
+      "window": 1,
+      "per_initiator_GBps_median": 0.3548734986226636,
+      "per_initiator_round_ms_median": 23.643274499999997,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "write",
+      "bytes": 65536,
+      "window": 32,
+      "per_initiator_GBps_median": 1.055991829758673,
+      "per_initiator_round_ms_median": 7.944409,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "write",
+      "bytes": 65536,
+      "window": 128,
+      "per_initiator_GBps_median": 1.1006244049475677,
+      "per_initiator_round_ms_median": 7.62172,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "write",
+      "bytes": 1048576,
+      "window": 1,
+      "per_initiator_GBps_median": 1.28637418459877,
+      "per_initiator_round_ms_median": 104.338706,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "write",
+      "bytes": 1048576,
+      "window": 32,
+      "per_initiator_GBps_median": 0.702080684665713,
+      "per_initiator_round_ms_median": 191.1800525,
+      "samples": 6
+    },
+    {
+      "pattern": "pair",
+      "operation": "write",
+      "bytes": 1048576,
+      "window": 128,
+      "per_initiator_GBps_median": 1.6684947236433874,
+      "per_initiator_round_ms_median": 80.463704,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "read",
+      "bytes": 4096,
+      "window": 1,
+      "per_initiator_GBps_median": 0.026041645357161802,
+      "per_initiator_round_ms_median": 20.1343705,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "read",
+      "bytes": 4096,
+      "window": 32,
+      "per_initiator_GBps_median": 0.0922808809606751,
+      "per_initiator_round_ms_median": 5.68203,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "read",
+      "bytes": 4096,
+      "window": 128,
+      "per_initiator_GBps_median": 0.10980277248869048,
+      "per_initiator_round_ms_median": 4.7751719999999995,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "read",
+      "bytes": 65536,
+      "window": 1,
+      "per_initiator_GBps_median": 0.31162391113170296,
+      "per_initiator_round_ms_median": 26.920034,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "read",
+      "bytes": 65536,
+      "window": 32,
+      "per_initiator_GBps_median": 1.1722028172581629,
+      "per_initiator_round_ms_median": 7.156528,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "read",
+      "bytes": 65536,
+      "window": 128,
+      "per_initiator_GBps_median": 1.172072350015013,
+      "per_initiator_round_ms_median": 7.1578305,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "read",
+      "bytes": 1048576,
+      "window": 1,
+      "per_initiator_GBps_median": 1.0796006612796907,
+      "per_initiator_round_ms_median": 124.3220075,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "read",
+      "bytes": 1048576,
+      "window": 32,
+      "per_initiator_GBps_median": 3.1490475517259555,
+      "per_initiator_round_ms_median": 42.624629999999996,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "read",
+      "bytes": 1048576,
+      "window": 128,
+      "per_initiator_GBps_median": 3.34352845721493,
+      "per_initiator_round_ms_median": 40.213815,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "write",
+      "bytes": 4096,
+      "window": 1,
+      "per_initiator_GBps_median": 0.02852133738034941,
+      "per_initiator_round_ms_median": 18.383366000000002,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "write",
+      "bytes": 4096,
+      "window": 32,
+      "per_initiator_GBps_median": 0.10231288661515942,
+      "per_initiator_round_ms_median": 5.1286249999999995,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "write",
+      "bytes": 4096,
+      "window": 128,
+      "per_initiator_GBps_median": 0.12002229414855722,
+      "per_initiator_round_ms_median": 4.368259,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "write",
+      "bytes": 65536,
+      "window": 1,
+      "per_initiator_GBps_median": 0.3261314448869274,
+      "per_initiator_round_ms_median": 25.721578,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "write",
+      "bytes": 65536,
+      "window": 32,
+      "per_initiator_GBps_median": 1.0924404906980951,
+      "per_initiator_round_ms_median": 7.680619,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "write",
+      "bytes": 65536,
+      "window": 128,
+      "per_initiator_GBps_median": 1.2988994934866063,
+      "per_initiator_round_ms_median": 6.4692705,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "write",
+      "bytes": 1048576,
+      "window": 1,
+      "per_initiator_GBps_median": 0.8763668391521096,
+      "per_initiator_round_ms_median": 153.19294250000002,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "write",
+      "bytes": 1048576,
+      "window": 32,
+      "per_initiator_GBps_median": 0.726954282203822,
+      "per_initiator_round_ms_median": 184.636389,
+      "samples": 6
+    },
+    {
+      "pattern": "rotate",
+      "operation": "write",
+      "bytes": 1048576,
+      "window": 128,
+      "per_initiator_GBps_median": 1.9082413335358965,
+      "per_initiator_round_ms_median": 70.33610200000001,
+      "samples": 6
+    }
+  ]
+}

@@ -1,0 +1,90 @@
+[
+  {
+    "variant": "release",
+    "ns_per_round_trip": 1303
+  },
+  {
+    "variant": "base-release",
+    "ns_per_round_trip": 1260
+  },
+  {
+    "variant": "base-release",
+    "ns_per_round_trip": 1265
+  },
+  {
+    "variant": "base-release",
+    "ns_per_round_trip": 1247
+  },
+  {
+    "variant": "base-release",
+    "ns_per_round_trip": 1253
+  },
+  {
+    "variant": "release",
+    "ns_per_round_trip": 1316
+  },
+  {
+    "variant": "release",
+    "ns_per_round_trip": 1308
+  },
+  {
+    "variant": "release",
+    "ns_per_round_trip": 1304
+  },
+  {
+    "variant": "release",
+    "ns_per_round_trip": 1315
+  },
+  {
+    "variant": "base-release",
+    "ns_per_round_trip": 1252
+  },
+  {
+    "variant": "release",
+    "ns_per_round_trip": 1317
+  },
+  {
+    "variant": "release",
+    "ns_per_round_trip": 1294
+  },
+  {
+    "variant": "base-release",
+    "ns_per_round_trip": 1249
+  },
+  {
+    "variant": "base-release",
+    "ns_per_round_trip": 1246
+  },
+  {
+    "variant": "base-release",
+    "ns_per_round_trip": 1251
+  },
+  {
+    "variant": "release",
+    "ns_per_round_trip": 1322
+  },
+  {
+    "variant": "release",
+    "ns_per_round_trip": 1326
+  },
+  {
+    "variant": "base-release",
+    "ns_per_round_trip": 1250
+  },
+  {
+    "variant": "release",
+    "ns_per_round_trip": 1312
+  },
+  {
+    "variant": "release",
+    "ns_per_round_trip": 1313
+  },
+  {
+    "variant": "base-release",
+    "ns_per_round_trip": 1255
+  },
+  {
+    "variant": "base-release",
+    "ns_per_round_trip": 1248
+  }
+]

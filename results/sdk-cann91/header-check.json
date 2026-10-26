@@ -1,0 +1,25 @@
+{
+  "observed_at": "2026-10-19T17:43:54.701042+00:00",
+  "status": "passed",
+  "compiler": "g++ (Debian 12.2.0-14+deb12u1) 12.2.0",
+  "sdk_version": "9.1.0",
+  "hixl_version": "9.1.0",
+  "scope": "Compile-only syntax/type compatibility with authentic SDK headers; no CPU SDK shim headers, library linking or device execution.",
+  "source_files": [
+    "src/transport/ascend/ascend_direct_transport.cpp",
+    "src/transport/ascend/hixl_engine.cpp",
+    "src/transport/ascend/local_copy_engine.cpp",
+    "src/transport/ascend/resource_config.cpp",
+    "tests/ascend_direct_transport_test.cpp"
+  ],
+  "source_sha256": {
+    "src/transport/ascend/ascend_direct_transport.cpp": "3db3c5b4effc4165e73e5ae187883b2aba55dce3f16e15e0e7304a83135968e0",
+    "src/transport/ascend/hixl_engine.cpp": "37722b1958e0b9ccb84496e627702b048ecbc3f8e26eac9cea1fa3fbe11b06b8",
+    "src/transport/ascend/local_copy_engine.cpp": "ce006de64cf236726d2a84c6340418713ff6c4289aecd1e545689a93dfeaa307",
+    "src/transport/ascend/resource_config.cpp": "036ae6ef064f6d9d10d38618658ea336a7e203d4a5af88fbc7d2f22c18d5cd48",
+    "tests/ascend_direct_transport_test.cpp": "71f12d9853377f1bef5133f9e9a54cc3063f1cefcb8353d0feeeb5caa7108969"
+  },
+  "headers_archive_sha256": "f31cb33f93dc867dae47b4ec6522787332028b592ff2d7769b539a5bfef4f875",
+  "patch_sha256": "e84d1e9752ba6e19752e2413198ceab3399090df09b4cf7a4b802e17e497b8cc",
+  "command": "ASCEND_HEADER_ROOT=<CANN x86_64-linux/include> YLT_SOURCE=<yalantinglibs> PREFIX=<development packages> bash ops/check_sdk_headers.sh"
+}
