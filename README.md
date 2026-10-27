@@ -15,9 +15,16 @@
 准备审查实现：
 
 1. [技术报告](REPORT.md)
-2. [技术源码指南](docs/source-guide.md)
-3. [PR 草稿](docs/pr-draft.md)
-4. [可应用补丁](patches/0001-ascend-cooperative-progress.patch)
+2. [上游缺陷核查](docs/upstream-bug-audit.md)
+3. [技术源码指南](docs/source-guide.md)
+4. [PR 草稿](docs/pr-draft.md)
+5. [可应用补丁](patches/0001-ascend-cooperative-progress.patch)
+
+准备继续实施或提交上游：
+
+1. [Issue/PR 提交手稿](docs/upstream-submission-manuscript.md)
+2. [对话与决策记录](docs/conversation-and-decisions.md)
+3. [后续实施清单](docs/follow-up-implementation.md)
 
 ## 已完成的验证
 
@@ -91,7 +98,7 @@ bash ops/run_cpu_regression.sh \
 | `benchmarks/` | 通过完整 TENT C ABI 发起 READ/WRITE |
 | `ops/` | 构建、运行、汇总和绘图入口 |
 | `results/` | 脱敏后的机读结果与图 |
-| `docs/` | 技术源码指南和 PR 草稿 |
+| `docs/` | 源码指南、上游核查、提交手稿、决策记录和实施清单 |
 
 ## 许可证与上游
 

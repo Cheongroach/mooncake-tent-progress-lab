@@ -4,6 +4,11 @@ Local draft only. No issue or pull request has been published.
 
 Patch base: `kvcache-ai/Mooncake@5d0636f5d39f9de729a58ea036f98c395dd0b291`.
 
+Current-main audit on 2026-10-27:
+`b730bbae5f8b89ce79f609df9c66b59bea1b3f8b`. The four target files were
+byte-identical to the original base, and this patch passed `git apply --check`.
+Repeat this audit immediately before publication.
+
 ## Problem
 
 The Ascend Direct transport allows at most 100 in-flight transfer groups. A
@@ -20,6 +25,32 @@ group to overwrite the old result.
 
 The local-copy cleanup path also releases host completion flags before stopping
 the ACL stream that may still write them.
+
+## Related Upstream Work
+
+Replace `#NNNN` after filing the dedicated bug report:
+
+```text
+Fixes #NNNN
+```
+
+- [Mooncake#3919](https://github.com/kvcache-ai/Mooncake/issues/3919) /
+  [Mooncake#3933](https://github.com/kvcache-ai/Mooncake/pull/3933)
+  established the async AutoConnect-only TENT Ascend backend.
+- [Mooncake#2116](https://github.com/kvcache-ai/Mooncake/issues/2116)
+  discusses separating status observation from explicit progress.
+- [Mooncake#2277](https://github.com/kvcache-ai/Mooncake/pull/2277)
+  adds terminal-event progress for other transports and explicitly leaves
+  `ascend_direct` out of scope because completion is query-driven.
+- [Mooncake#3116](https://github.com/kvcache-ai/Mooncake/pull/3116) and
+  [Mooncake#2505](https://github.com/kvcache-ai/Mooncake/pull/2505)
+  fix adjacent Ascend result-lifecycle and polling defects.
+- [Mooncake#4247](https://github.com/kvcache-ai/Mooncake/issues/4247)
+  concerns quiescence in the classic synchronous Ascend path, not TENT.
+
+This patch is a transport-local cooperative-progress fix. It does not add the
+runtime background worker proposed in
+[Mooncake#2277](https://github.com/kvcache-ai/Mooncake/pull/2277).
 
 ## Change
 
